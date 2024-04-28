@@ -12,12 +12,14 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/shm.h>
-#include <time.h> // For time(NULL)
+#include <time.h>
 #include <stdarg.h>
 #include <stdbool.h>
 
+//Vystup programu
 #define OUTPUT_FILE_NAME "proj2.out"
 
+//Konstanty pre errorovy vystup : error_output()
 enum error_list
 {
     FORK,
@@ -29,6 +31,7 @@ enum error_list
     CASE,
     SEM
 };
+//Mozne stavy stavoveho autovatu pre skibus : bus_process()
 enum bus_state_list
 {
     START,
@@ -41,6 +44,7 @@ enum bus_state_list
     FINISH
 };
 
+//Struktura obsahujuca zadane parametre programu
 typedef struct Arguments
 {
     int L;  // pocet lyziarov L < 20000
@@ -49,7 +53,7 @@ typedef struct Arguments
     int TL; // Maximalni cas v mikrosekundach ktory lyziar caka nez pride na zastavku 0<=TL<=10000
     int TB; // Maximalna doba jazdy autobusom medzi dvoma zastavkami 0<=TB<=1000
 } Arguments;
-
+//Struktura obsahujuca zdielane data medzi procesmi
 typedef struct Shared_data
 {
     FILE *file;
@@ -59,30 +63,48 @@ typedef struct Shared_data
 
     struct Sbus
     {
-        enum bus_state_list cur_state;
+        enum bus_state_list cur_state;  
         enum bus_state_list next_state;
-        int idZ; // aktualna zastavka
-        int cur_number_of_skiers;
-        int total_number_of_skiers;
+        int idZ;                        // aktualna zastavka
+        int cur_number_of_skiers;       // aktualny pocet lyziarov v buse
+        int total_number_of_skiers;     // celkovy pocet lyziarov ktory nastupili do busu
     } bus;
 } Shared_data;
-
+//Struktura obsahujuce aktualne data pre lyziara
 typedef struct Skier
 {
-    int bstop; // zastavka
+    int bstop; // zastavka na ktorej bude lyziar cakat
 } Skier;
-
+//Struktura vsetkych semaforov 
 struct Semaphore
 {
     sem_t *s1;
     sem_t *s2;
     sem_t *s3;
     sem_t *s4;
-    sem_t *s5;
-    sem_t *s6;
-    sem_t *bstop[10];
-    sem_t *output;
+    sem_t *bstop[10];   //semafory pre kazdu zastavku
+    sem_t *output;      //semafor pre synchronizovany vystup
 } sem;
+
+//Funkcia urcena pre inicializaciu semafora
+sem_t *semaphore_init(sem_t *mutex, int init_val);
+//Funkcia urcena pre ukoncenie zdielanej pamate, otvoreneho suboru a semaforov
+void cleanup(Shared_data *sdata);
+//Funkcia obsahujuca vsetky errorove vystupy
+void error_output(enum error_list err, Shared_data *sdata);
+//Funkcia pre nastavenie zdielanych dat
+void Setup_sdata(Shared_data *sdata);
+//Funkcia pre naplnenie strukturi obsahujuca argumenti programu
+void Setup_args(int argc, char **argv, Arguments *args, Shared_data *sdata);
+//Funkcia pre synchronizovany vypis 
+void sync_print(FILE *file, Shared_data *sdata, const char *format, ...);
+//Funkcia vracajuca random hodnotu v urcitom rozmedzi
+int iRandom(int min, int max);
+//Funkcia ktora zabezpecuje chod autobusu
+void bus_process(Arguments args, Shared_data *sdata);
+//Funkcia ktora je rozstiepena a zabezpecuje chod lyziarov
+void skier_process(Arguments args, Shared_data *sdata, int id, int bstop);
+
 
 sem_t *semaphore_init(sem_t *mutex, int init_val)
 {
@@ -99,32 +121,23 @@ sem_t *semaphore_init(sem_t *mutex, int init_val)
     }
     return mutex;
 }
-
 void cleanup(Shared_data *sdata)
 {
     sem_destroy(sem.s1);
     sem_destroy(sem.s2);
     sem_destroy(sem.s3);
     sem_destroy(sem.s4);
-    sem_destroy(sem.s5);
-    sem_destroy(sem.s6);
     sem_destroy(sem.output);
-
-    for (int i = 0; i < 10; i++)
-    {
-        sem_destroy(sem.bstop[i]);
-    }
 
     munmap(sem.s1, sizeof(sem_t));
     munmap(sem.s2, sizeof(sem_t));
     munmap(sem.s3, sizeof(sem_t));
     munmap(sem.s4, sizeof(sem_t));
-    munmap(sem.s5, sizeof(sem_t));
-    munmap(sem.s6, sizeof(sem_t));
     munmap(sem.output, sizeof(sem_t));
 
     for (int i = 0; i < 10; i++)
     {
+        sem_destroy(sem.bstop[i]);
         munmap(sem.bstop[i], sizeof(sem_t));
     }
 
@@ -132,7 +145,6 @@ void cleanup(Shared_data *sdata)
 
     munmap(sdata, sizeof(Shared_data));
 }
-
 void error_output(enum error_list err, Shared_data *sdata)
 {
     switch (err)
@@ -176,10 +188,9 @@ void error_output(enum error_list err, Shared_data *sdata)
     }
     exit(1);
 }
-
 void Setup_sdata(Shared_data *sdata)
 {
-    sdata->file = fopen(OUTPUT_FILE_NAME, "w+");
+    sdata->file = fopen(OUTPUT_FILE_NAME, "w");
     if (sdata->file == NULL)
         error_output(FILEF, sdata);
 
@@ -196,12 +207,10 @@ void Setup_sdata(Shared_data *sdata)
     sdata->bus.cur_number_of_skiers = 0;
     sdata->bus.total_number_of_skiers = 0;
 
-    sem.s1 = semaphore_init(sem.s1, 1);
+    sem.s1 = semaphore_init(sem.s1, 0);
     sem.s2 = semaphore_init(sem.s2, 0);
     sem.s3 = semaphore_init(sem.s3, 0);
     sem.s4 = semaphore_init(sem.s4, 0);
-    sem.s5 = semaphore_init(sem.s5, 0);
-    sem.s6 = semaphore_init(sem.s6, 1);
     sem.output = semaphore_init(sem.output, 1);
 
     for (int i = 0; i < 10; i++)
@@ -209,7 +218,6 @@ void Setup_sdata(Shared_data *sdata)
         sem.bstop[i] = semaphore_init(sem.bstop[i], 0);
     }
 }
-
 void Setup_args(int argc, char **argv, Arguments *args, Shared_data *sdata)
 {
     char *checkptr = NULL;
@@ -227,7 +235,6 @@ void Setup_args(int argc, char **argv, Arguments *args, Shared_data *sdata)
     if ((args->TB = strtol(argv[5], &checkptr, 10)) < 0 || *checkptr != 0 || args->TB > 1000) // 0<=TB<=1000
         error_output(ARGF, sdata);
 }
-
 void sync_print(FILE *file, Shared_data *sdata, const char *format, ...)
 {
     sem_wait(sem.output);
@@ -239,13 +246,11 @@ void sync_print(FILE *file, Shared_data *sdata, const char *format, ...)
     va_end(args);
     sem_post(sem.output);
 }
-
 int iRandom(int min, int max)
 {
     srand((time(NULL) * getpid()));
     return rand() % (max - min + 1) + min;
 }
-
 void bus_process(Arguments args, Shared_data *sdata)
 {
     // START state
@@ -269,8 +274,8 @@ void bus_process(Arguments args, Shared_data *sdata)
                 sdata->bstop[sdata->bus.idZ - 1]--;
                 sdata->bus.cur_number_of_skiers++;
                 sdata->bus.total_number_of_skiers++;
-                sem_post(sem.s2);
-                sem_wait(sem.s3);
+                sem_post(sem.s1);
+                sem_wait(sem.s2);
             }
             sdata->bus.next_state = LEAVE;
             break;
@@ -290,9 +295,9 @@ void bus_process(Arguments args, Shared_data *sdata)
             // povolenie vystup
             while (sdata->bus.cur_number_of_skiers > 0)
             {
-                sem_post(sem.s4);
+                sem_post(sem.s3);
                 sdata->bus.cur_number_of_skiers--;
-                sem_wait(sem.s5);
+                sem_wait(sem.s4);
             }
             sdata->bus.next_state = FLEAVE;
             break;
@@ -314,7 +319,6 @@ void bus_process(Arguments args, Shared_data *sdata)
     // FINISH state
     sync_print(sdata->file, sdata, "BUS: finish\n");
 }
-
 void skier_process(Arguments args, Shared_data *sdata, int id, int bstop)
 {
     // START
@@ -327,12 +331,12 @@ void skier_process(Arguments args, Shared_data *sdata, int id, int bstop)
     // BOARDING
     sem_wait(sem.bstop[bstop - 1]);
     sync_print(sdata->file, sdata, "L %i: boarding\n", id);
-    sem_wait(sem.s2);
-    sem_post(sem.s3);
+    sem_wait(sem.s1);
+    sem_post(sem.s2);
     // SKI
-    sem_wait(sem.s4);
+    sem_wait(sem.s3);
     sync_print(sdata->file, sdata, "L %i: going to ski\n", id);
-    sem_post(sem.s5);
+    sem_post(sem.s4);
 }
 
 int main(int argc, char **argv)
@@ -343,13 +347,9 @@ int main(int argc, char **argv)
         error_output(SDATA, NULL);
 
     Setup_args(argc, argv, &args, sdata);
-
     Setup_sdata(sdata);
 
-    srand(time(NULL));
-
     pid_t pid = fork(); // Create a new process
-
     if (pid < 0)
         error_output(FORK, sdata);
     else if (pid == 0)
@@ -362,11 +362,8 @@ int main(int argc, char **argv)
         for (int i = 1; i <= args.L; i++)
         {
             pid_t pid = fork(); // Create a new process
-
             if (pid < 0)
-            {
                 error_output(FORK, sdata);
-            }
             else if (pid == 0)
             {
                 skier_process(args, sdata, i, iRandom(1, args.Z));
