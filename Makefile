@@ -1,4 +1,4 @@
-CFLAGS=-std=gnu11 -Wall -Wextra  -g 
+CFLAGS=-std=gnu99 -Wall -Wextra -Werror -pedantic
 
 all: proj2 main skuska
 

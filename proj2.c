@@ -12,9 +12,11 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/shm.h>
-#include <time.h>  // For time(NULL)
+#include <time.h> // For time(NULL)
+#include <stdarg.h>
+#include <stdbool.h>
 
-#define OUTPUT_FILE_NAME "project2.out"
+#define OUTPUT_FILE_NAME "proj2.out"
 
 enum error_list
 {
@@ -53,7 +55,7 @@ typedef struct Shared_data
     FILE *file;
 
     int bstop[10]; // pole zastaviek, obsahuje pocet lyziarov na zastavke
-    int cnt;    // pocitadlo vypisov
+    int cnt;       // pocitadlo vypisov
 
     struct Sbus
     {
@@ -63,12 +65,12 @@ typedef struct Shared_data
         int cur_number_of_skiers;
         int total_number_of_skiers;
     } bus;
-
-    struct Skier
-    {
-        int bstop; // zastavka
-    } skier;
 } Shared_data;
+
+typedef struct Skier
+{
+    int bstop; // zastavka
+} Skier;
 
 struct Semaphore
 {
@@ -79,6 +81,7 @@ struct Semaphore
     sem_t *s5;
     sem_t *s6;
     sem_t *bstop[10];
+    sem_t *output;
 } sem;
 
 sem_t *semaphore_init(sem_t *mutex, int init_val)
@@ -105,12 +108,12 @@ void cleanup(Shared_data *sdata)
     sem_destroy(sem.s4);
     sem_destroy(sem.s5);
     sem_destroy(sem.s6);
+    sem_destroy(sem.output);
 
     for (int i = 0; i < 10; i++)
     {
         sem_destroy(sem.bstop[i]);
     }
-    
 
     munmap(sem.s1, sizeof(sem_t));
     munmap(sem.s2, sizeof(sem_t));
@@ -118,6 +121,7 @@ void cleanup(Shared_data *sdata)
     munmap(sem.s4, sizeof(sem_t));
     munmap(sem.s5, sizeof(sem_t));
     munmap(sem.s6, sizeof(sem_t));
+    munmap(sem.output, sizeof(sem_t));
 
     for (int i = 0; i < 10; i++)
     {
@@ -184,7 +188,7 @@ void Setup_sdata(Shared_data *sdata)
     for (int i = 0; i < 10; i++)
         sdata->bstop[i] = 0;
 
-    sdata->cnt = 0;
+    sdata->cnt = 1;
 
     sdata->bus.cur_state = START;
     sdata->bus.next_state = DRIVE;
@@ -194,16 +198,16 @@ void Setup_sdata(Shared_data *sdata)
 
     sem.s1 = semaphore_init(sem.s1, 1);
     sem.s2 = semaphore_init(sem.s2, 0);
-    sem.s3 = semaphore_init(sem.s3, 0); 
+    sem.s3 = semaphore_init(sem.s3, 0);
     sem.s4 = semaphore_init(sem.s4, 0);
     sem.s5 = semaphore_init(sem.s5, 0);
-    sem.s6 = semaphore_init(sem.s6, 1); 
+    sem.s6 = semaphore_init(sem.s6, 1);
+    sem.output = semaphore_init(sem.output, 1);
 
     for (int i = 0; i < 10; i++)
     {
         sem.bstop[i] = semaphore_init(sem.bstop[i], 0);
     }
-    
 }
 
 void Setup_args(int argc, char **argv, Arguments *args, Shared_data *sdata)
@@ -224,6 +228,18 @@ void Setup_args(int argc, char **argv, Arguments *args, Shared_data *sdata)
         error_output(ARGF, sdata);
 }
 
+void sync_print(FILE *file, Shared_data *sdata, const char *format, ...)
+{
+    sem_wait(sem.output);
+    va_list args;
+    va_start(args, format);
+    fprintf(file, "%d: ", sdata->cnt++);
+    vfprintf(file, format, args);
+    fflush(file);
+    va_end(args);
+    sem_post(sem.output);
+}
+
 int iRandom(int min, int max)
 {
     srand((time(NULL) * getpid()));
@@ -233,7 +249,7 @@ int iRandom(int min, int max)
 void bus_process(Arguments args, Shared_data *sdata)
 {
     // START state
-    fprintf(sdata->file, "%i: BUS: started\n", ++sdata->cnt);
+    sync_print(sdata->file, sdata, "BUS: started\n");
     while (sdata->bus.next_state != FINISH)
     {
         sdata->bus.cur_state = sdata->bus.next_state;
@@ -241,38 +257,36 @@ void bus_process(Arguments args, Shared_data *sdata)
         {
         case DRIVE:
             sdata->bus.idZ++;
-            usleep(iRandom(0, args.TB)); 
+            usleep(iRandom(0, args.TB));
             sdata->bus.next_state = ARIVE;
             break;
         case ARIVE:
-            fprintf(sdata->file, "%i: BUS: arrived to %i\n", ++sdata->cnt, sdata->bus.idZ);
+            sync_print(sdata->file, sdata, "BUS: arrived to %i\n", sdata->bus.idZ);
             // povolenie nastup
-            while (sdata->bstop[sdata->bus.idZ-1] != 0 && args.K != sdata->bus.cur_number_of_skiers) 
+            while (sdata->bstop[sdata->bus.idZ - 1] > 0 && args.K > sdata->bus.cur_number_of_skiers)
             {
-                fprintf(sdata->file, "Start while sem = %i\n", sdata->bus.idZ-1);
                 sem_post(sem.bstop[sdata->bus.idZ - 1]);
                 sdata->bstop[sdata->bus.idZ - 1]--;
                 sdata->bus.cur_number_of_skiers++;
                 sdata->bus.total_number_of_skiers++;
-                sem_post(sem.s1);
-                fprintf(sdata->file, "waiting with bstop=%i, cur=%i, total=%i\n", sdata->bstop[sdata->bus.idZ - 1], sdata->bus.cur_number_of_skiers, sdata->bus.total_number_of_skiers);
+                sem_post(sem.s2);
                 sem_wait(sem.s3);
             }
             sdata->bus.next_state = LEAVE;
             break;
         case LEAVE:
-            fprintf(sdata->file, "%i: BUS: leaving %i\n", ++sdata->cnt, sdata->bus.idZ);
+            sync_print(sdata->file, sdata, "BUS: leaving %i\n", sdata->bus.idZ);
             if (sdata->bus.idZ < args.Z)
                 sdata->bus.next_state = DRIVE;
             else
                 sdata->bus.next_state = FDRIVE;
             break;
         case FDRIVE:
-            usleep(iRandom(0, args.TB)); 
+            usleep(iRandom(0, args.TB));
             sdata->bus.next_state = FARIVE;
             break;
         case FARIVE:
-            fprintf(sdata->file, "%i: BUS: arived to final\n", ++sdata->cnt);
+            sync_print(sdata->file, sdata, "BUS: arrived to final\n");
             // povolenie vystup
             while (sdata->bus.cur_number_of_skiers > 0)
             {
@@ -283,7 +297,7 @@ void bus_process(Arguments args, Shared_data *sdata)
             sdata->bus.next_state = FLEAVE;
             break;
         case FLEAVE:
-            fprintf(sdata->file, "%i: BUS: leaving final\n", ++sdata->cnt);
+            sync_print(sdata->file, sdata, "BUS: leaving final\n");
             if (sdata->bus.total_number_of_skiers < args.L)
             {
                 sdata->bus.idZ = 0;
@@ -298,30 +312,28 @@ void bus_process(Arguments args, Shared_data *sdata)
         }
     }
     // FINISH state
-    fprintf(sdata->file, "%i: BUS: finish\n", ++sdata->cnt);
+    sync_print(sdata->file, sdata, "BUS: finish\n");
 }
 
-void skier_process(Arguments args, Shared_data *sdata, int id)
+void skier_process(Arguments args, Shared_data *sdata, int id, int bstop)
 {
     // START
-    fprintf(sdata->file, "%i: L %i: started\n", ++sdata->cnt, id);
+    sync_print(sdata->file, sdata, "L %i: started\n", id);
     // BREAKFAST
     usleep(iRandom(0, args.TL));
     // BSTOP
-    // sem_wait(sem.s1);
-    fprintf(sdata->file, "%i: L %i: arrived to %i\n", ++sdata->cnt, id, sdata->skier.bstop);
-    sdata->bstop[sdata->skier.bstop - 1]++;
-    // sem_post(sem.s1);
+    sync_print(sdata->file, sdata, "L %i: arrived to %i\n", id, bstop);
+    sdata->bstop[bstop - 1]++;
     // BOARDING
-    sem_wait(sem.bstop[sdata->skier.bstop-1]);
-    fprintf(sdata->file, "%i: L %i: boarding\n", ++sdata->cnt, id);
-    sem_wait(sem.s1);
+    sem_wait(sem.bstop[bstop - 1]);
+    sync_print(sdata->file, sdata, "L %i: boarding\n", id);
+    sem_wait(sem.s2);
     sem_post(sem.s3);
     // SKI
     sem_wait(sem.s4);
-    fprintf(sdata->file, "%i: L %i: going to ski\n", ++sdata->cnt, id);
+    sync_print(sdata->file, sdata, "L %i: going to ski\n", id);
     sem_post(sem.s5);
-} 
+}
 
 int main(int argc, char **argv)
 {
@@ -357,8 +369,7 @@ int main(int argc, char **argv)
             }
             else if (pid == 0)
             {
-                sdata->skier.bstop = iRandom(1, args.Z);
-                skier_process(args, sdata, i);
+                skier_process(args, sdata, i, iRandom(1, args.Z));
                 exit(0);
             }
         }
